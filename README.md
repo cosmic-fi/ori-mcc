@@ -1,9 +1,9 @@
-# Minecraft Java Core Module
+# Minecraft Java Core Module (ori-mcc)
 NodeJS Module for Minecraft launcher functionalities
 
-[![Latest Version](https://img.shields.io/npm/v/ori-core-java?style=social&logo=appveyor)](https://npmjs.com/ori-core-java)
-[![Code Size](https://img.shields.io/github/languages/code-size/cosmic-fi/Ori-Core-Java?style=social&logo=appveyor)](https://npmjs.com/ori-core-java)
-[![Install Size](https://badgen.net/packagephobia/install/ori-core-java)](https://npmjs.com/ori-core-java)
+[![Latest Version](https://img.shields.io/npm/v/ori-mcc?style=social&logo=appveyor)](https://npmjs.com/ori-mcc)
+[![Code Size](https://img.shields.io/github/languages/code-size/cosmic-fi/ori-mcc?style=social&logo=appveyor)](https://npmjs.com/ori-mcc)
+[![Install Size](https://badgen.net/packagephobia/install/ori-mcc)](https://npmjs.com/ori-mcc)
 ---
 
 ## Key Features

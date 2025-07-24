@@ -19,55 +19,86 @@ import argumentsMinecraft from './Minecraft/Minecraft-Arguments.js';
 import { isold } from './utils/Index.js';
 import Downloader from './utils/Downloader.js';
 
-type loader = {
-    type?: string,
-    build?: string,
-    enable?: boolean
+// Proper interfaces at the top
+interface LaunchEvents {
+    'data': (message: string) => void;
+    'progress': (downloaded: number, total: number, element?: string) => void;
+    'speed': (speed: number) => void;
+    'estimated': (time: number) => void;
+    'error': (error: Error) => void;
+    'close': (message: string) => void;
 }
 
-type screen = {
-    width?: number,
-    height?: number,
-    fullscreen?: boolean
+interface LoaderConfig {
+    type: 'forge' | 'fabric' | 'quilt' | 'neoforge' | 'legacyfabric' | null;
+    build: string;
+    enable: boolean;
 }
 
-type memory = {
-    min?: string,
-    max?: string
+interface MemoryConfig {
+    min: string;
+    max: string;
 }
 
-type LaunchOPTS = {
-    url: string | null,
-    authenticator: any,
-    timeout?: number,
-    path: string,
-    version: string,
-    instance?: string,
-    detached?: boolean,
-    downloadFileMultiple?: number,
-    intelEnabledMac?: boolean,
-    loader: loader,
-    verify: boolean,
-    ignored: string[],
-    JVM_ARGS: string[],
-    GAME_ARGS: string[],
-    javaPath: string,
-    screen: screen,
-    memory: memory
-};
+interface ScreenConfig {
+    width?: number;
+    height?: number;
+    fullscreen: boolean;
+}
 
-export default class Launch {
+export interface LaunchOPTS {
+    url: string | null;
+    authenticator: any;
+    timeout?: number;
+    path: string;
+    version: string;
+    instance?: string;
+    detached?: boolean;
+    downloadFileMultiple?: number;
+    intelEnabledMac?: boolean;
+    loader: LoaderConfig;
+    verify: boolean;
+    ignored: string[];
+    JVM_ARGS: string[];
+    GAME_ARGS: string[];
+    javaPath: string | null;
+    screen: ScreenConfig;
+    memory: MemoryConfig;
+}
+
+export default class Launch extends EventEmitter {
     options: LaunchOPTS;
-    on: any;
-    emit: any;
 
     constructor() {
-        this.on = EventEmitter.prototype.on;
-        this.emit = EventEmitter.prototype.emit;
+        super(); // Proper EventEmitter inheritance
     }
 
-    async Launch(opt: LaunchOPTS) {
-        const defaultOptions: LaunchOPTS = {
+    async Launch(opt: Partial<LaunchOPTS>): Promise<void> {
+        try {
+            this.options = this.validateOptions(opt);
+            
+            this.options.path = path.resolve(this.options.path).replace(/\\/g, '/');
+            if (this.options.loader.type) {
+                this.options.loader.type = this.options.loader.type.toLowerCase() as any;
+                this.options.loader.build = this.options.loader.build.toLowerCase();
+            }
+            
+            if (!this.options.authenticator) {
+                throw new Error('Authenticator is required');
+            }
+            
+            // Validate download limits
+            this.options.downloadFileMultiple = Math.max(1, Math.min(30, this.options.downloadFileMultiple || 5));
+            
+            await this.start();
+        } catch (error) {
+            this.emit('error', error);
+            throw error;
+        }
+    }
+
+    private validateOptions(options: Partial<LaunchOPTS>): LaunchOPTS {
+        const defaults: LaunchOPTS = {
             url: null,
             authenticator: null,
             timeout: 10000,
@@ -77,46 +108,36 @@ export default class Launch {
             detached: false,
             intelEnabledMac: false,
             downloadFileMultiple: 5,
-
             loader: {
                 type: null,
                 build: 'latest',
                 enable: false,
             },
-
             verify: false,
             ignored: [],
             JVM_ARGS: [],
             GAME_ARGS: [],
-
             javaPath: null,
-
             screen: {
                 width: null,
                 height: null,
                 fullscreen: false,
             },
-
             memory: {
                 min: '1G',
                 max: '2G'
             },
-            ...opt,
         };
-
-        this.options = defaultOptions;
-
-        this.options.path = path.resolve(this.options.path).replace(/\\/g, '/');
-        if (this.options.loader.type) {
-            this.options.loader.type = this.options.loader.type.toLowerCase()
-            this.options.loader.build = this.options.loader.build.toLowerCase()
+        
+        const merged = { ...defaults, ...options } as LaunchOPTS;
+        
+        // Validate memory format
+        if (!/^\d+[GMK]$/.test(merged.memory.min) || !/^\d+[GMK]$/.test(merged.memory.max)) {
+            throw new Error('Invalid memory format. Use format like "1G", "512M", etc.');
         }
-        if (!this.options.authenticator) return this.emit("error", { error: "Authenticator not found" });
-        if (this.options.downloadFileMultiple < 1) this.options.downloadFileMultiple = 1
-        if (this.options.downloadFileMultiple > 30) this.options.downloadFileMultiple = 30
-        this.start();
+        
+        return merged;
     }
-
 
     async start() {
         let data: any = await this.DownloadGame();

@@ -1,3 +1,8 @@
+/**
+ * @author Luuxis
+ * Luuxis License v1.0 (voir fichier LICENSE pour les détails en FR/EN)
+ */
+
 function CustomBuffer(existingBuffer: any = Buffer.alloc(48)) {
     let buffer = existingBuffer;
     let offset = 0;

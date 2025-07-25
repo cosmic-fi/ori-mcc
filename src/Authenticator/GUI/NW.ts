@@ -1,9 +1,8 @@
 /**
- * @author Cosmic-fi
- * @license CC-BY-NC 4.0 - https://creativecommons.org/licenses/by-nc/4.0/
+ * @author Luuxis
+ * Luuxis License v1.0 (voir fichier LICENSE pour les détails en FR/EN)
  */
 
-'use strict';
 import path from 'path';
 
 const defaultProperties = {

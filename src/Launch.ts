@@ -6,7 +6,7 @@
 import { EventEmitter } from 'events';
 import path from 'path';
 import fs from 'fs';
-import { spawn } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 
 import jsonMinecraft from './Minecraft/Minecraft-Json.js';
 import librariesMinecraft from './Minecraft/Minecraft-Libraries.js';
@@ -200,6 +200,9 @@ export type LaunchOPTS = {
 
 export default class Launch extends EventEmitter {
 	options: LaunchOPTS;
+	private minecraftProcess: ChildProcess | null = null;
+	private downloader: Downloader | null = null;
+	private isCancelled: boolean = false;
 
 	async Launch(opt: LaunchOPTS) {
 		const defaultOptions: LaunchOPTS = {
@@ -399,5 +402,29 @@ export default class Launch extends EventEmitter {
 			minecraftVersion: version,
 			minecraftJava: gameJava
 		}
+	}
+
+	public async cancel(): Promise<void> {
+		this.isCancelled = true;
+		// Kill the Minecraft process if it's running
+		if (this.minecraftProcess) {
+			try {
+				if (this.minecraftProcess.exitCode === null && this.minecraftProcess.signalCode === null) {
+					this.minecraftProcess.kill('SIGTERM');
+					await new Promise(resolve => setTimeout(resolve, 1000));
+					if (this.minecraftProcess.exitCode === null && this.minecraftProcess.signalCode === null) {
+						this.minecraftProcess.kill('SIGKILL');
+					}
+				}
+			} catch (error) {
+				console.warn('Error killing Minecraft process:', error);
+			}
+			this.minecraftProcess = null;
+		}
+		// Downloader cancellation (not implemented in Downloader, just nullifies reference)
+		if (this.downloader) {
+			this.downloader = null;
+		}
+		this.emit('cancelled', 'Launch process has been cancelled');
 	}
 }

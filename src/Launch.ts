@@ -203,6 +203,7 @@ export default class Launch extends EventEmitter {
 	private minecraftProcess: ChildProcess | null = null;
 	private downloader: Downloader | null = null;
 	private isCancelled: boolean = false;
+	private abortController: AbortController | null = null;
 
 	async Launch(opt: LaunchOPTS) {
 		const defaultOptions: LaunchOPTS = {
@@ -272,16 +273,20 @@ export default class Launch extends EventEmitter {
 
 
 	async start() {
+		this.isCancelled = false;
+		this.abortController = new AbortController();
+		if (this.isCancelled) return;
 		let data: any = await this.DownloadGame();
+		if (this.isCancelled) return;
 		if (data.error) return this.emit('error', data);
 		let { minecraftJson, minecraftLoader, minecraftVersion, minecraftJava } = data;
-
+		if (this.isCancelled) return;
 		let minecraftArguments: any = await new argumentsMinecraft(this.options).GetArguments(minecraftJson, minecraftLoader);
+		if (this.isCancelled) return;
 		if (minecraftArguments.error) return this.emit('error', minecraftArguments);
-
 		let loaderArguments: any = await new loaderMinecraft(this.options).GetArguments(minecraftLoader, minecraftVersion);
+		if (this.isCancelled) return;
 		if (loaderArguments.error) return this.emit('error', loaderArguments);
-
 		let Arguments: any = [
 			...minecraftArguments.jvm,
 			...minecraftArguments.classpath,
@@ -289,124 +294,112 @@ export default class Launch extends EventEmitter {
 			minecraftArguments.mainClass,
 			...minecraftArguments.game,
 			...loaderArguments.game
-		]
-
+		];
 		let java: any = this.options.java.path ? this.options.java.path : minecraftJava.path;
 		let logs = this.options.instance ? `${this.options.path}/instances/${this.options.instance}` : this.options.path;
 		if (!fs.existsSync(logs)) fs.mkdirSync(logs, { recursive: true });
-
-		let argumentsLogs: string = Arguments.join(' ')
-		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.access_token, '????????')
-		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.client_token, '????????')
-		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.uuid, '????????')
-		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.xboxAccount?.xuid, '????????')
-		argumentsLogs = argumentsLogs.replaceAll(`${this.options.path}/`, '')
+		let argumentsLogs: string = Arguments.join(' ');
+		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.access_token, '????????');
+		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.client_token, '????????');
+		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.uuid, '????????');
+		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.xboxAccount?.xuid, '????????');
+		argumentsLogs = argumentsLogs.replaceAll(`${this.options.path}/`, '');
 		this.emit('data', `Launching with arguments ${argumentsLogs}`);
-
-		let minecraftDebug = spawn(java, Arguments, { cwd: logs, detached: this.options.detached })
-		minecraftDebug.stdout.on('data', (data) => this.emit('data', data.toString('utf-8')))
-		minecraftDebug.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')))
-		minecraftDebug.on('close', (code) => this.emit('close', 'Minecraft closed'))
+		if (this.isCancelled) return;
+		this.minecraftProcess = spawn(java, Arguments, { cwd: logs, detached: this.options.detached });
+		this.minecraftProcess.stdout.on('data', (data) => this.emit('data', data.toString('utf-8')));
+		this.minecraftProcess.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')));
+		this.minecraftProcess.on('close', (code) => this.emit('close', 'Minecraft closed'));
 	}
 
 	async DownloadGame() {
+		if (this.isCancelled) return;
 		let InfoVersion = await new jsonMinecraft(this.options).GetInfoVersion();
+		if (this.isCancelled) return;
 		let loaderJson: any = null;
 		if ('error' in InfoVersion) {
 			return this.emit('error', InfoVersion);
 		}
 		let { json, version } = InfoVersion;
-
-		let libraries = new librariesMinecraft(this.options)
-		let bundle = new bundleMinecraft(this.options)
-		let java = new javaMinecraft(this.options)
-
+		let libraries = new librariesMinecraft(this.options);
+		let bundle = new bundleMinecraft(this.options);
+		let java = new javaMinecraft(this.options);
 		java.on('progress', (progress: any, size: any, element: any) => {
-			this.emit('progress', progress, size, element)
+			this.emit('progress', progress, size, element);
 		});
-
 		java.on('extract', (progress: any) => {
-			this.emit('extract', progress)
+			this.emit('extract', progress);
 		});
-
 		let gameLibraries: any = await libraries.Getlibraries(json);
+		if (this.isCancelled) return;
 		let gameAssetsOther: any = await libraries.GetAssetsOthers(this.options.url);
+		if (this.isCancelled) return;
 		let gameAssets: any = await new assetsMinecraft(this.options).getAssets(json);
+		if (this.isCancelled) return;
 		let gameJava: any = this.options.java.path ? { files: [] } : await java.getJavaFiles(json);
-
-
-		if (gameJava.error) return gameJava
-
+		if (this.isCancelled) return;
+		if (gameJava.error) return gameJava;
 		let filesList: any = await bundle.checkBundle([...gameLibraries, ...gameAssetsOther, ...gameAssets, ...gameJava.files]);
-
+		if (this.isCancelled) return;
 		if (filesList.length > 0) {
-			let downloader = new Downloader();
+			this.downloader = new Downloader();
 			let totsize = await bundle.getTotalSize(filesList);
-
-			downloader.on("progress", (DL: any, totDL: any, element: any) => {
+			this.downloader.on("progress", (DL: any, totDL: any, element: any) => {
 				this.emit("progress", DL, totDL, element);
 			});
-
-			downloader.on("speed", (speed: any) => {
+			this.downloader.on("speed", (speed: any) => {
 				this.emit("speed", speed);
 			});
-
-			downloader.on("estimated", (time: any) => {
+			this.downloader.on("estimated", (time: any) => {
 				this.emit("estimated", time);
 			});
-
-			downloader.on("error", (e: any) => {
+			this.downloader.on("error", (e: any) => {
 				this.emit("error", e);
 			});
-
-			await downloader.downloadFileMultiple(filesList, totsize, this.options.downloadFileMultiple, this.options.timeout);
+			await this.downloader.downloadFileMultiple(filesList, totsize, this.options.downloadFileMultiple, this.options.timeout, this.abortController?.signal);
+			if (this.isCancelled) return;
 		}
-
 		if (this.options.loader.enable === true) {
-			let loaderInstall = new loaderMinecraft(this.options)
-
+			let loaderInstall = new loaderMinecraft(this.options);
 			loaderInstall.on('extract', (extract: any) => {
 				this.emit('extract', extract);
 			});
-
 			loaderInstall.on('progress', (progress: any, size: any, element: any) => {
 				this.emit('progress', progress, size, element);
 			});
-
 			loaderInstall.on('check', (progress: any, size: any, element: any) => {
 				this.emit('check', progress, size, element);
 			});
-
 			loaderInstall.on('patch', (patch: any) => {
 				this.emit('patch', patch);
 			});
-
 			let jsonLoader = await loaderInstall.GetLoader(version, this.options.java.path ? this.options.java.path : gameJava.path)
 				.then((data: any) => data)
 				.catch((err: any) => err);
+			if (this.isCancelled) return;
 			if (jsonLoader.error) return jsonLoader;
 			loaderJson = jsonLoader;
 		}
-
 		if (this.options.verify) await bundle.checkFiles([...gameLibraries, ...gameAssetsOther, ...gameAssets, ...gameJava.files]);
-
+		if (this.isCancelled) return;
 		let natives = await libraries.natives(gameLibraries);
+		if (this.isCancelled) return;
 		if (natives.length === 0) json.nativesList = false;
 		else json.nativesList = true;
-
 		if (isold(json)) new assetsMinecraft(this.options).copyAssets(json);
-
 		return {
 			minecraftJson: json,
 			minecraftLoader: loaderJson,
 			minecraftVersion: version,
 			minecraftJava: gameJava
-		}
+		};
 	}
 
 	public async cancel(): Promise<void> {
 		this.isCancelled = true;
-		// Kill the Minecraft process if it's running
+		if (this.abortController) {
+			this.abortController.abort();
+		}
 		if (this.minecraftProcess) {
 			try {
 				if (this.minecraftProcess.exitCode === null && this.minecraftProcess.signalCode === null) {
@@ -421,7 +414,6 @@ export default class Launch extends EventEmitter {
 			}
 			this.minecraftProcess = null;
 		}
-		// Downloader cancellation (not implemented in Downloader, just nullifies reference)
 		if (this.downloader) {
 			this.downloader = null;
 		}

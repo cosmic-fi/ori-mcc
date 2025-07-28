@@ -86,19 +86,19 @@ export default class Downloader extends EventEmitter {
 		files: DownloadOptions[],
 		size: number,
 		limit: number = 1,
-		timeout: number = 10000
+		timeout: number = 10000,
+		abortSignal?: AbortSignal
 	): Promise<void> {
 		if (limit > files.length) limit = files.length;
-
-		let completed = 0;     // Number of downloads completed
-		let downloaded = 0;    // Cumulative bytes downloaded
-		let queued = 0;        // Index of the next file to download
-
+		let completed = 0;
+		let downloaded = 0;
+		let queued = 0;
 		let start = Date.now();
 		let before = 0;
 		const speeds: number[] = [];
-
+		let aborted = false;
 		const estimated = setInterval(() => {
+			if (aborted) return;
 			const duration = (Date.now() - start) / 1000;
 			const chunkDownloaded = downloaded - before;
 			if (speeds.length >= 5) speeds.shift();
@@ -115,7 +115,7 @@ export default class Downloader extends EventEmitter {
 		}, 500);
 
 		const downloadNext = async (): Promise<void> => {
-			if (queued >= files.length) return;
+			if (aborted || queued >= files.length) return;
 
 			const file = files[queued++];
 			if (!fs.existsSync(file.folder)) {
@@ -127,6 +127,7 @@ export default class Downloader extends EventEmitter {
 			const timeoutId = setTimeout(() => controller.abort(), timeout);
 
 			try {
+				if (aborted) throw new Error('Download aborted');
 				const response = await fetch(file.url, { signal: controller.signal });
 
 				clearTimeout(timeoutId);
@@ -134,6 +135,7 @@ export default class Downloader extends EventEmitter {
 				const stream = fromAnyReadable(response.body as any);
 
 				stream.on('data', (chunk: Buffer) => {
+					if (aborted) return;
 					downloaded += chunk.length;
 					this.emit('progress', downloaded, size, file.type);
 					writer.write(chunk);
@@ -152,7 +154,6 @@ export default class Downloader extends EventEmitter {
 					downloadNext();
 				});
 			} catch (e) {
-				clearTimeout(timeoutId);
 				writer.destroy();
 				this.emit('error', e);
 				completed++;
@@ -160,15 +161,12 @@ export default class Downloader extends EventEmitter {
 			}
 		};
 
-		// Start "limit" concurrent downloads
 		for (let i = 0; i < limit; i++) {
 			downloadNext();
 		}
-
-		// Wait until all downloads complete
 		return new Promise((resolve) => {
 			const interval = setInterval(() => {
-				if (completed === files.length) {
+				if (aborted || completed === files.length) {
 					clearInterval(estimated);
 					clearInterval(interval);
 					resolve();

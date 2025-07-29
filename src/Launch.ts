@@ -310,6 +310,9 @@ export default class Launch extends EventEmitter {
 		this.minecraftProcess.stdout.on('data', (data) => this.emit('data', data.toString('utf-8')));
 		this.minecraftProcess.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')));
 		this.minecraftProcess.on('close', (code) => this.emit('close', 'Minecraft closed'));
+
+		// Add this line to emit 'complete' when Minecraft successfully launches
+		this.emit('complete', { message: 'Minecraft launched successfully', process: this.minecraftProcess.pid });
 	}
 
 	async DownloadGame() {
@@ -351,7 +354,7 @@ export default class Launch extends EventEmitter {
 				this.emit("speed", speed);
 			});
 			this.downloader.on("estimated", (time: any) => {
-				this.emit("estimated", time);
+				this.emit("estimated_time", time);  // Changed from "estimated" to "estimated_time"
 			});
 			this.downloader.on("error", (e: any) => {
 				this.emit("error", e);

@@ -204,6 +204,7 @@ export default class Launch extends EventEmitter {
 	private downloader: Downloader | null = null;
 	private isCancelled: boolean = false;
 	private abortController: AbortController | null = null;
+	private isLaunching: boolean = false;
 
 	async Launch(opt: LaunchOPTS) {
 		const defaultOptions: LaunchOPTS = {
@@ -271,8 +272,13 @@ export default class Launch extends EventEmitter {
 		this.start();
 	}
 
-
 	async start() {
+		if (this.isLaunching) {
+			this.emit('error', { error: 'Launch already in progress' });
+			return;
+		}
+		
+		this.isLaunching = true;
 		this.isCancelled = false;
 		this.abortController = new AbortController();
 		if (this.isCancelled) return;
@@ -308,7 +314,10 @@ export default class Launch extends EventEmitter {
 		if (this.isCancelled) return;
 		this.minecraftProcess = spawn(java, Arguments, { cwd: logs, detached: this.options.detached });
 		this.minecraftProcess.stdout.on('data', (data) => this.emit('data', data.toString('utf-8')));
+		this.minecraftProcess.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')));
 		this.minecraftProcess.on('close', (code) => this.emit('close', 'Minecraft closed'));
+
+		// Add this line to emit 'complete' when Minecraft successfully launches
 		this.emit('complete', { message: 'Minecraft launched successfully', process: this.minecraftProcess.pid });
 	}
 
@@ -342,7 +351,12 @@ export default class Launch extends EventEmitter {
 		let filesList: any = await bundle.checkBundle([...gameLibraries, ...gameAssetsOther, ...gameAssets, ...gameJava.files]);
 		if (this.isCancelled) return;
 		if (filesList.length > 0) {
-			this.downloader = new Downloader();
+		    // Clean up previous downloader if it exists
+		    if (this.downloader) {
+		        this.downloader.removeAllListeners();
+		    }
+		    
+		    this.downloader = new Downloader();
 			let totsize = await bundle.getTotalSize(filesList);
 			this.downloader.on("progress", (DL: any, totDL: any, element: any) => {
 				this.emit("progress", DL, totDL, element);
@@ -415,8 +429,13 @@ export default class Launch extends EventEmitter {
 			this.minecraftProcess = null;
 		}
 		if (this.downloader) {
+			this.downloader.removeAllListeners(); // Add this line
 			this.downloader = null;
 		}
+		
+		// Clean up any other event emitters
+		this.removeAllListeners();
+		
 		this.emit('cancelled', 'Launch process has been cancelled');
 	}
 }

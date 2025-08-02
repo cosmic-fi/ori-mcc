@@ -308,10 +308,7 @@ export default class Launch extends EventEmitter {
 		if (this.isCancelled) return;
 		this.minecraftProcess = spawn(java, Arguments, { cwd: logs, detached: this.options.detached });
 		this.minecraftProcess.stdout.on('data', (data) => this.emit('data', data.toString('utf-8')));
-		this.minecraftProcess.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')));
 		this.minecraftProcess.on('close', (code) => this.emit('close', 'Minecraft closed'));
-
-		// Add this line to emit 'complete' when Minecraft successfully launches
 		this.emit('complete', { message: 'Minecraft launched successfully', process: this.minecraftProcess.pid });
 	}
 

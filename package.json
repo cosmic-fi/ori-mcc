@@ -1,6 +1,6 @@
 {
     "name": "ori-mcc",
-    "version": "1.0.8",
+    "version": "1.0.9",
     "types": "./build/Index.d.ts",
     "exports": {
         ".": {

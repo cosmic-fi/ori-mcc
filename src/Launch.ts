@@ -203,6 +203,7 @@ export default class Launch extends EventEmitter {
 	private minecraftProcess: ChildProcess | null = null;
 	private downloader: Downloader | null = null;
 	private isCancelled: boolean = false;
+	private isLaunching: boolean = false;
 	private abortController: AbortController | null = null;
 
 	async Launch(opt: LaunchOPTS) {
@@ -273,44 +274,57 @@ export default class Launch extends EventEmitter {
 
 
 	async start() {
-		this.isCancelled = false;
-		this.abortController = new AbortController();
-		if (this.isCancelled) return;
-		let data: any = await this.DownloadGame();
-		if (this.isCancelled) return;
-		if (data.error) return this.emit('error', data);
-		let { minecraftJson, minecraftLoader, minecraftVersion, minecraftJava } = data;
-		if (this.isCancelled) return;
-		let minecraftArguments: any = await new argumentsMinecraft(this.options).GetArguments(minecraftJson, minecraftLoader);
-		if (this.isCancelled) return;
-		if (minecraftArguments.error) return this.emit('error', minecraftArguments);
-		let loaderArguments: any = await new loaderMinecraft(this.options).GetArguments(minecraftLoader, minecraftVersion);
-		if (this.isCancelled) return;
-		if (loaderArguments.error) return this.emit('error', loaderArguments);
-		let Arguments: any = [
-			...minecraftArguments.jvm,
-			...minecraftArguments.classpath,
-			...loaderArguments.jvm,
-			minecraftArguments.mainClass,
-			...minecraftArguments.game,
-			...loaderArguments.game
-		];
-		let java: any = this.options.java.path ? this.options.java.path : minecraftJava.path;
-		let logs = this.options.instance ? `${this.options.path}/instances/${this.options.instance}` : this.options.path;
-		if (!fs.existsSync(logs)) fs.mkdirSync(logs, { recursive: true });
-		let argumentsLogs: string = Arguments.join(' ');
-		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.access_token, '????????');
-		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.client_token, '????????');
-		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.uuid, '????????');
-		argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.xboxAccount?.xuid, '????????');
-		argumentsLogs = argumentsLogs.replaceAll(`${this.options.path}/`, '');
-		this.emit('data', `Launching with arguments ${argumentsLogs}`);
-		if (this.isCancelled) return;
-		this.minecraftProcess = spawn(java, Arguments, { cwd: logs, detached: this.options.detached });
-		this.minecraftProcess.stdout.on('data', (data) => this.emit('data', data.toString('utf-8')));
-		this.minecraftProcess.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')));
-		this.minecraftProcess.on('close', (code) => this.emit('close', 'Minecraft closed'));
-		this.emit('complete', { message: 'Minecraft launched successfully', process: this.minecraftProcess.pid });
+		try {
+			this.isCancelled = false;
+			this.isLaunching = true;
+			this.abortController = new AbortController();
+			if (this.isCancelled) {
+				this.isLaunching = false;
+				return;
+			}
+			let data: any = await this.DownloadGame();
+			if (this.isCancelled) return;
+			if (data.error) return this.emit('error', data);
+			let { minecraftJson, minecraftLoader, minecraftVersion, minecraftJava } = data;
+			if (this.isCancelled) return;
+			let minecraftArguments: any = await new argumentsMinecraft(this.options).GetArguments(minecraftJson, minecraftLoader);
+			if (this.isCancelled) return;
+			if (minecraftArguments.error) return this.emit('error', minecraftArguments);
+			let loaderArguments: any = await new loaderMinecraft(this.options).GetArguments(minecraftLoader, minecraftVersion);
+			if (this.isCancelled) return;
+			if (loaderArguments.error) return this.emit('error', loaderArguments);
+			let Arguments: any = [
+				...minecraftArguments.jvm,
+				...minecraftArguments.classpath,
+				...loaderArguments.jvm,
+				minecraftArguments.mainClass,
+				...minecraftArguments.game,
+				...loaderArguments.game
+			];
+			let java: any = this.options.java.path ? this.options.java.path : minecraftJava.path;
+			let logs = this.options.instance ? `${this.options.path}/instances/${this.options.instance}` : this.options.path;
+			if (!fs.existsSync(logs)) fs.mkdirSync(logs, { recursive: true });
+			let argumentsLogs: string = Arguments.join(' ');
+			argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.access_token, '????????');
+			argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.client_token, '????????');
+			argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.uuid, '????????');
+			argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.xboxAccount?.xuid, '????????');
+			argumentsLogs = argumentsLogs.replaceAll(`${this.options.path}/`, '');
+			this.emit('data', `Launching with arguments ${argumentsLogs}`);
+			if (this.isCancelled) return;
+			this.minecraftProcess = spawn(java, Arguments, { cwd: logs, detached: this.options.detached });
+			this.minecraftProcess.stdout.on('data', (data) => this.emit('data', data.toString('utf-8')));
+			this.minecraftProcess.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')));
+			this.minecraftProcess.on('close', (code) => this.emit('close', 'Minecraft closed'));
+
+			// At the end of successful launch
+			this.emit('complete', { message: 'Minecraft launched successfully', process: this.minecraftProcess.pid });
+			this.isLaunching = false;
+		}
+		catch (error) {
+			this.isLaunching = false;
+			this.emit('error', error);
+		}
 	}
 
 	async DownloadGame() {
@@ -398,6 +412,7 @@ export default class Launch extends EventEmitter {
 
 	public async cancel(): Promise<void> {
 		this.isCancelled = true;
+		this.isLaunching = false; // Add this line
 		if (this.abortController) {
 			this.abortController.abort();
 		}
@@ -419,5 +434,13 @@ export default class Launch extends EventEmitter {
 			this.downloader = null;
 		}
 		this.emit('cancelled', 'Launch process has been cancelled');
+	}
+
+	public get launching(): boolean {
+		return this.isLaunching;
+	}
+
+	public get cancelled(): boolean {
+		return this.isCancelled;
 	}
 }

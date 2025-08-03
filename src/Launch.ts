@@ -411,11 +411,16 @@ export default class Launch extends EventEmitter {
 	}
 
 	public async cancel(): Promise<void> {
+		const wasLaunching = this.isLaunching;
+		const hadProcess = !!this.minecraftProcess;
+		
 		this.isCancelled = true;
-		this.isLaunching = false; // Add this line
+		this.isLaunching = false;
+		
 		if (this.abortController) {
 			this.abortController.abort();
 		}
+		
 		if (this.minecraftProcess) {
 			try {
 				if (this.minecraftProcess.exitCode === null && this.minecraftProcess.signalCode === null) {
@@ -430,10 +435,25 @@ export default class Launch extends EventEmitter {
 			}
 			this.minecraftProcess = null;
 		}
+		
 		if (this.downloader) {
 			this.downloader = null;
 		}
-		this.emit('cancelled', 'Launch process has been cancelled');
+		
+		// Enhanced messaging based on state
+		let message = 'Launch process has been cancelled';
+		if (hadProcess) {
+			message += ' and Minecraft process was terminated';
+		} else if (wasLaunching) {
+			message += ' during launch preparation';
+		}
+		
+		this.emit('cancelled', {
+			message,
+			wasLaunching,
+			hadProcess,
+			timestamp: new Date().toISOString()
+		});
 	}
 
 	public get launching(): boolean {

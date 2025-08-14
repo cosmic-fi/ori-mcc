@@ -303,20 +303,33 @@ export default class Downloader extends EventEmitter {
 		}
 
 		return new Promise((resolve, reject) => {
-			const interval = setInterval(() => {
-				if (aborted || completed === files.length) {
+			const checkCompletion = () => {
+				if (aborted) {
 					clearInterval(estimated);
-					clearInterval(interval);
-					
-					// If there were critical errors (non-recoverable), reject
-					const criticalErrors = errors.filter(err => !err.hasOwnProperty('recoverable') || !(err as any).recoverable);
-					if (criticalErrors.length > 0) {
-						reject(criticalErrors[0]);
-					} else {
-						resolve();
-					}
+					reject(new DownloadError('Download aborted', '', undefined, ErrorCodes.DOWNLOAD_INTERRUPTED));
+					return;
 				}
-			}, 100);
+				
+				if (completed === files.length) {
+					clearInterval(estimated);
+					
+					// Ensure all streams are properly closed
+					setTimeout(() => {
+						const criticalErrors = errors.filter(err => !err.hasOwnProperty('recoverable') || !(err as any).recoverable);
+						if (criticalErrors.length > 0) {
+							reject(criticalErrors[0]);
+						} else {
+							resolve();
+						}
+					}, 100); // Small delay to ensure all streams are closed
+					return;
+				}
+			};
+			
+			const interval = setInterval(checkCompletion, 100);
+			
+			// Also check immediately
+			checkCompletion();
 		});
 	}
 

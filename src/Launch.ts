@@ -325,11 +325,13 @@ export default class Launch extends EventEmitter {
 			this.minecraftProcess.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')));
 			this.minecraftProcess.on('close', (code) => this.emit('close', 'Minecraft closed'));
 
-			// At the end of successful launch
+			// Wait a bit to ensure game is actually running
+			await new Promise(resolve => setTimeout(resolve, 1000));
+			
+			// Only emit complete after everything is done
 			this.emit('complete', { message: 'Minecraft launched successfully', process: this.minecraftProcess.pid });
 			this.isLaunching = false;
-		}
-		catch (error) {
+		} catch (error) {
 			this.isLaunching = false;
 			this.emit('error', error);
 		}
@@ -364,6 +366,7 @@ export default class Launch extends EventEmitter {
 		if (gameJava.error) return gameJava;
 		let filesList: any = await bundle.checkBundle([...gameLibraries, ...gameAssetsOther, ...gameAssets, ...gameJava.files]);
 		if (this.isCancelled) return;
+		// In DownloadGame method, after downloadFileMultiple completes:
 		if (filesList.length > 0) {
 			this.downloader = new Downloader();
 			let totsize = await bundle.getTotalSize(filesList);
@@ -398,6 +401,7 @@ export default class Launch extends EventEmitter {
 
 			try {
 				await this.downloader.downloadFileMultiple(filesList, totsize, this.options.downloadFileMultiple, this.options.timeout, this.abortController?.signal);
+				this.emit('downloads_complete', { message: 'All downloads finished', fileCount: filesList.length });
 			} catch (error: any) {
 				// Handle recoverable vs non-recoverable errors
 				if (isRecoverableError(error)) {

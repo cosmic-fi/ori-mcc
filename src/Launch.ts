@@ -198,6 +198,14 @@ export type LaunchOPTS = {
 	memory: memory
 };
 
+import { 
+    OriCoreError, 
+    NetworkError, 
+    DownloadError, 
+    isRecoverableError,
+    ErrorCodes 
+} from './utils/Errors.js';
+
 export default class Launch extends EventEmitter {
 	options: LaunchOPTS;
 	private minecraftProcess: ChildProcess | null = null;
@@ -359,19 +367,47 @@ export default class Launch extends EventEmitter {
 		if (filesList.length > 0) {
 			this.downloader = new Downloader();
 			let totsize = await bundle.getTotalSize(filesList);
+			
 			this.downloader.on("progress", (DL: any, totDL: any, element: any) => {
 				this.emit("progress", DL, totDL, element);
 			});
+			
 			this.downloader.on("speed", (speed: any) => {
 				this.emit("speed", speed);
 			});
+			
 			this.downloader.on("estimated", (time: any) => {
-				this.emit("estimated_time", time);  // Changed from "estimated" to "estimated_time"
+				this.emit("estimated_time", time);
 			});
+			
 			this.downloader.on("error", (e: any) => {
+				// Emit specific error types instead of generic "error"
+				if (e instanceof DownloadError) {
+					this.emit("download_error", e);
+				} else if (e instanceof NetworkError) {
+					this.emit("network_error", e);
+				} else if (e instanceof OriCoreError) {
+					this.emit("ori_error", e);
+				} else {
+					this.emit("error", e);
+				}
+				
+				// Also emit the generic error for backward compatibility
 				this.emit("error", e);
 			});
-			await this.downloader.downloadFileMultiple(filesList, totsize, this.options.downloadFileMultiple, this.options.timeout, this.abortController?.signal);
+
+			try {
+				await this.downloader.downloadFileMultiple(filesList, totsize, this.options.downloadFileMultiple, this.options.timeout, this.abortController?.signal);
+			} catch (error: any) {
+				// Handle recoverable vs non-recoverable errors
+				if (isRecoverableError(error)) {
+					this.emit("recoverable_error", error);
+				} else {
+					this.emit("fatal_error", error);
+				}
+				throw error;
+			}
+			
 			if (this.isCancelled) return;
 		}
 		if (this.options.loader.enable === true) {

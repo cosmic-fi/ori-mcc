@@ -6,6 +6,15 @@
 import fs from 'fs';
 import { EventEmitter } from 'events';
 import { fromAnyReadable } from './Index.js';
+import { 
+    DownloadError, 
+    TimeoutError, 
+    ConnectionError, 
+    FileSystemError, 
+    ValidationError,
+    ErrorCodes,
+    wrapError
+} from './Errors.js';
 
 /**
  * Describes a single file to be downloaded by the Downloader class.
@@ -37,12 +46,49 @@ export default class Downloader extends EventEmitter {
 	 * @param fileName - Name of the file (e.g., "mod.jar")
 	 */
 	public async downloadFile(url: string, dirPath: string, fileName: string): Promise<void> {
-		if (!fs.existsSync(dirPath)) {
-			fs.mkdirSync(dirPath, { recursive: true });
+		try {
+			if (!fs.existsSync(dirPath)) {
+				fs.mkdirSync(dirPath, { recursive: true });
+			}
+		} catch (err: any) {
+			const fsError = new FileSystemError(
+				`Failed to create directory: ${err.message}`,
+				dirPath,
+				'mkdir',
+				false,
+				ErrorCodes.DIRECTORY_CREATE_FAILED
+			);
+			this.emit('error', fsError);
+			throw fsError;
 		}
 
 		const writer = fs.createWriteStream(`${dirPath}/${fileName}`);
-		const response = await fetch(url);
+		let response: Response;
+
+		try {
+			response = await fetch(url);
+			
+			if (!response.ok) {
+				const downloadError = new DownloadError(
+					`HTTP ${response.status}: Failed to download ${fileName}`,
+					url,
+					response.status,
+					ErrorCodes.HTTP_ERROR
+				);
+				this.emit('error', downloadError);
+				throw downloadError;
+			}
+		} catch (err: any) {
+			writer.destroy();
+			
+			if (err instanceof DownloadError) {
+				throw err;
+			}
+			
+			const wrappedError = wrapError(err, { url, fileName });
+			this.emit('error', wrappedError);
+			throw wrappedError;
+		}
 
 		const contentLength = response.headers.get('content-length');
 		const totalSize = contentLength ? parseInt(contentLength, 10) : 0;
@@ -54,9 +100,21 @@ export default class Downloader extends EventEmitter {
 
 			body.on('data', (chunk: Buffer) => {
 				downloaded += chunk.length;
-				// Emit progress with the current number of bytes vs. total size
 				this.emit('progress', downloaded, totalSize);
-				writer.write(chunk);
+				try {
+					writer.write(chunk);
+				} catch (err: any) {
+					const fsError = new FileSystemError(
+						`Failed to write to file: ${err.message}`,
+						`${dirPath}/${fileName}`,
+						'write',
+						false,
+						ErrorCodes.DISK_FULL
+					);
+					writer.destroy();
+					this.emit('error', fsError);
+					reject(fsError);
+				}
 			});
 
 			body.on('end', () => {
@@ -66,8 +124,21 @@ export default class Downloader extends EventEmitter {
 
 			body.on('error', (err: Error) => {
 				writer.destroy();
-				this.emit('error', err);
-				reject(err);
+				const wrappedError = wrapError(err, { url, fileName, downloaded, totalSize });
+				this.emit('error', wrappedError);
+				reject(wrappedError);
+			});
+
+			writer.on('error', (err: Error) => {
+				writer.destroy();
+				const fsError = new FileSystemError(
+					`File write error: ${err.message}`,
+					`${dirPath}/${fileName}`,
+					'write',
+					false
+				);
+				this.emit('error', fsError);
+				reject(fsError);
 			});
 		});
 	}
@@ -76,11 +147,6 @@ export default class Downloader extends EventEmitter {
 	 * Downloads multiple files concurrently (up to the specified limit).
 	 * Emits "progress" events with cumulative bytes downloaded vs. total size,
 	 * as well as "speed" and "estimated" events for speed and ETA calculations.
-	 *
-	 * @param files - An array of DownloadOptions describing each file
-	 * @param size - The total size (in bytes) of all files to be downloaded
-	 * @param limit - The maximum number of simultaneous downloads
-	 * @param timeout - A timeout in milliseconds for each fetch request
 	 */
 	public async downloadFileMultiple(
 		files: DownloadOptions[],
@@ -97,6 +163,15 @@ export default class Downloader extends EventEmitter {
 		let before = 0;
 		const speeds: number[] = [];
 		let aborted = false;
+		const errors: Error[] = [];
+
+		// Handle abort signal
+		if (abortSignal) {
+			abortSignal.addEventListener('abort', () => {
+				aborted = true;
+			});
+		}
+
 		const estimated = setInterval(() => {
 			if (aborted) return;
 			const duration = (Date.now() - start) / 1000;
@@ -118,19 +193,57 @@ export default class Downloader extends EventEmitter {
 			if (aborted || queued >= files.length) return;
 
 			const file = files[queued++];
-			if (!fs.existsSync(file.folder)) {
-				fs.mkdirSync(file.folder, { recursive: true, mode: 0o777 });
+			
+			try {
+				if (!fs.existsSync(file.folder)) {
+					fs.mkdirSync(file.folder, { recursive: true, mode: 0o777 });
+				}
+			} catch (err: any) {
+				const fsError = new FileSystemError(
+					`Failed to create directory: ${err.message}`,
+					file.folder,
+					'mkdir',
+					false,
+					ErrorCodes.DIRECTORY_CREATE_FAILED
+				);
+				errors.push(fsError);
+				this.emit('error', fsError);
+				completed++;
+				downloadNext();
+				return;
 			}
 
 			const writer = fs.createWriteStream(file.path, { flags: 'w', mode: 0o777 });
 			const controller = new AbortController();
-			const timeoutId = setTimeout(() => controller.abort(), timeout);
+			const timeoutId = setTimeout(() => {
+				controller.abort();
+				const timeoutError = new TimeoutError(
+					`Download timeout for ${file.url}`,
+					timeout,
+					ErrorCodes.NETWORK_TIMEOUT
+				);
+				errors.push(timeoutError);
+				this.emit('error', timeoutError);
+			}, timeout);
 
 			try {
-				if (aborted) throw new Error('Download aborted');
-				const response = await fetch(file.url, { signal: controller.signal });
+				if (aborted) {
+					const abortError = new DownloadError('Download aborted by user', file.url, undefined, ErrorCodes.DOWNLOAD_INTERRUPTED);
+					throw abortError;
+				}
 
+				const response = await fetch(file.url, { signal: controller.signal });
 				clearTimeout(timeoutId);
+
+				if (!response.ok) {
+					const downloadError = new DownloadError(
+						`HTTP ${response.status}: Failed to download from ${file.url}`,
+						file.url,
+						response.status,
+						ErrorCodes.HTTP_ERROR
+					);
+					throw downloadError;
+				}
 
 				const stream = fromAnyReadable(response.body as any);
 
@@ -138,7 +251,18 @@ export default class Downloader extends EventEmitter {
 					if (aborted) return;
 					downloaded += chunk.length;
 					this.emit('progress', downloaded, size, file.type);
-					writer.write(chunk);
+					try {
+						writer.write(chunk);
+					} catch (err: any) {
+						const fsError = new FileSystemError(
+							`Failed to write chunk: ${err.message}`,
+							file.path,
+							'write',
+							false
+						);
+						errors.push(fsError);
+						this.emit('error', fsError);
+					}
 				});
 
 				stream.on('end', () => {
@@ -149,13 +273,26 @@ export default class Downloader extends EventEmitter {
 
 				stream.on('error', (err) => {
 					writer.destroy();
-					this.emit('error', err);
+					const wrappedError = wrapError(err, { url: file.url, path: file.path });
+					errors.push(wrappedError);
+					this.emit('error', wrappedError);
 					completed++;
 					downloadNext();
 				});
-			} catch (e) {
+
+			} catch (e: any) {
 				writer.destroy();
-				this.emit('error', e);
+				clearTimeout(timeoutId);
+				
+				let error: Error;
+				if (e instanceof Error) {
+					error = e;
+				} else {
+					error = wrapError(new Error(String(e)), { url: file.url, path: file.path });
+				}
+				
+				errors.push(error);
+				this.emit('error', error);
 				completed++;
 				downloadNext();
 			}
@@ -164,12 +301,20 @@ export default class Downloader extends EventEmitter {
 		for (let i = 0; i < limit; i++) {
 			downloadNext();
 		}
-		return new Promise((resolve) => {
+
+		return new Promise((resolve, reject) => {
 			const interval = setInterval(() => {
 				if (aborted || completed === files.length) {
 					clearInterval(estimated);
 					clearInterval(interval);
-					resolve();
+					
+					// If there were critical errors (non-recoverable), reject
+					const criticalErrors = errors.filter(err => !err.hasOwnProperty('recoverable') || !(err as any).recoverable);
+					if (criticalErrors.length > 0) {
+						reject(criticalErrors[0]);
+					} else {
+						resolve();
+					}
 				}
 			}, 100);
 		});

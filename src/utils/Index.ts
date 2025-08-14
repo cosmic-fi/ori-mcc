@@ -286,3 +286,6 @@ export {
 	skipLibrary,
 	fromAnyReadable
 };
+
+// Export error types
+export * from './Errors.js';

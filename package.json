@@ -30,7 +30,16 @@
         "Game",
         "Minecraft-Launcher",
         "Forge",
-        "Minecraft-Forge"
+        "Minecraft-Forge",
+        "Neoforge",
+        "Minecraft-Neoforge",
+        "Fabric",
+        "Minecraft-Fabric",
+        "LegacyFabric",
+        "Minecraft-LegacyFabric",
+        "Quilt",
+        "Minecraft-Quilt",
+        "Ori-MCCORE"
     ],
     "author": "Cosmic-fi",
     "license": "MIT",

@@ -18,6 +18,8 @@ import argumentsMinecraft from './Minecraft/Minecraft-Arguments.js';
 
 import { isold } from './utils/Index.js';
 import Downloader from './utils/Downloader.js';
+import { MemoryManager, StringBuilder } from './utils/MemoryManager.js';
+import PerformanceMonitor from './utils/PerformanceMonitor.js';
 
 type loader = {
 	/**
@@ -195,7 +197,15 @@ export type LaunchOPTS = {
 	/**
 	 * Memory limit options.
 	 */
-	memory: memory
+	memory: memory,
+	/**
+	 * Resource packs to enable.
+	 */
+	resourcePacks?: Array<{
+		name: string,
+		fileName: string,
+		filePath: string
+	}>;
 };
 
 import { 
@@ -213,6 +223,15 @@ export default class Launch extends EventEmitter {
 	private isCancelled: boolean = false;
 	private isLaunching: boolean = false;
 	private abortController: AbortController | null = null;
+	private memoryManager: MemoryManager;
+	private stringBuilderPool: StringBuilder[] = [];
+	private performanceMonitor: PerformanceMonitor;
+
+	constructor() {
+		super();
+		this.memoryManager = MemoryManager.getInstance();
+		this.performanceMonitor = PerformanceMonitor.getInstance();
+	}
 
 	async Launch(opt: LaunchOPTS) {
 		const defaultOptions: LaunchOPTS = {
@@ -262,6 +281,10 @@ export default class Launch extends EventEmitter {
 
 		this.options = defaultOptions;
 		this.options.path = path.resolve(this.options.path).replace(/\\/g, '/');
+		
+		// Debug logging for version
+		console.log(`[Launch] Original version from options: ${opt?.version}`);
+		console.log(`[Launch] Final version after defaults: ${this.options.version}`);
 
 		if (this.options.mcp) {
 			if (this.options.instance) this.options.mcp = `${this.options.path}/instances/${this.options.instance}/${this.options.mcp}`
@@ -273,7 +296,11 @@ export default class Launch extends EventEmitter {
 			this.options.loader.build = this.options.loader.build.toLowerCase()
 		}
 
-		if (!this.options.authenticator) return this.emit("error", { error: "Authenticator not found" });
+		if (!this.options.authenticator) {
+			const error = { error: "Authenticator not found" };
+			this.emit("error", error);
+			return error;
+		}
 		if (this.options.downloadFileMultiple < 1) this.options.downloadFileMultiple = 1
 		if (this.options.downloadFileMultiple > 30) this.options.downloadFileMultiple = 30
 		if (typeof this.options.loader.path !== 'string') this.options.loader.path = `./loader/${this.options.loader.type}`;
@@ -286,21 +313,38 @@ export default class Launch extends EventEmitter {
 			this.isCancelled = false;
 			this.isLaunching = true;
 			this.abortController = new AbortController();
+			
+			// Start performance monitoring
+			this.performanceMonitor.startLaunchMonitoring();
+			
 			if (this.isCancelled) {
 				this.isLaunching = false;
 				return;
 			}
 			let data: any = await this.DownloadGame();
 			if (this.isCancelled) return;
-			if (data.error) return this.emit('error', data);
+			if (data.error) {
+				this.emit('error', data);
+				this.isLaunching = false;
+				return;
+			}
 			let { minecraftJson, minecraftLoader, minecraftVersion, minecraftJava } = data;
+			console.log(`[Launch] DownloadGame returned version: ${minecraftVersion}`);
 			if (this.isCancelled) return;
 			let minecraftArguments: any = await new argumentsMinecraft(this.options).GetArguments(minecraftJson, minecraftLoader);
 			if (this.isCancelled) return;
-			if (minecraftArguments.error) return this.emit('error', minecraftArguments);
+			if (minecraftArguments.error) {
+				this.emit('error', minecraftArguments);
+				this.isLaunching = false;
+				return;
+			}
 			let loaderArguments: any = await new loaderMinecraft(this.options).GetArguments(minecraftLoader, minecraftVersion);
 			if (this.isCancelled) return;
-			if (loaderArguments.error) return this.emit('error', loaderArguments);
+			if (loaderArguments.error) {
+				this.emit('error', loaderArguments);
+				this.isLaunching = false;
+				return;
+			}
 			let Arguments: any = [
 				...minecraftArguments.jvm,
 				...minecraftArguments.classpath,
@@ -312,24 +356,78 @@ export default class Launch extends EventEmitter {
 			let java: any = this.options.java.path ? this.options.java.path : minecraftJava.path;
 			let logs = this.options.instance ? `${this.options.path}/instances/${this.options.instance}` : this.options.path;
 			if (!fs.existsSync(logs)) fs.mkdirSync(logs, { recursive: true });
-			let argumentsLogs: string = Arguments.join(' ');
-			argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.access_token, '????????');
-			argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.client_token, '????????');
-			argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.uuid, '????????');
-			argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.xboxAccount?.xuid, '????????');
-			argumentsLogs = argumentsLogs.replaceAll(`${this.options.path}/`, '');
-			this.emit('data', `Launching with arguments ${argumentsLogs}`);
+			
+			// Use StringBuilder for efficient string building
+			const stringBuilder = this.memoryManager.getFromPool('StringBuilder', () => new StringBuilder());
+			try {
+				stringBuilder.append('Launching with arguments ');
+				stringBuilder.append(Arguments.join(' '));
+				let argumentsLogs = stringBuilder.toString();
+				argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.access_token, '????????');
+				argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.client_token, '????????');
+				argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.uuid, '????????');
+				argumentsLogs = argumentsLogs.replaceAll(this.options.authenticator?.xboxAccount?.xuid, '????????');
+				argumentsLogs = argumentsLogs.replaceAll(`${this.options.path}/`, '');
+				this.emit('data', argumentsLogs);
+			} finally {
+				stringBuilder.clear();
+				this.memoryManager.returnToPool('StringBuilder', stringBuilder, (obj) => obj.clear());
+			}
 			if (this.isCancelled) return;
 			this.minecraftProcess = spawn(java, Arguments, { cwd: logs, detached: this.options.detached });
-			this.minecraftProcess.stdout.on('data', (data) => this.emit('data', data.toString('utf-8')));
-			this.minecraftProcess.stderr.on('data', (data) => this.emit('data', data.toString('utf-8')));
-			this.minecraftProcess.on('close', (code) => this.emit('close', 'Minecraft closed'));
+			
+			// Track process start time for crash detection
+			const processStartTime = Date.now();
+			let hasExitedNormally = false;
+			let lastOutputTime = Date.now();
+			
+			this.minecraftProcess.stdout.on('data', (data) => {
+				lastOutputTime = Date.now();
+				this.emit('data', data.toString('utf-8'));
+			});
+			
+			this.minecraftProcess.stderr.on('data', (data) => {
+				lastOutputTime = Date.now();
+				this.emit('data', data.toString('utf-8'));
+			});
+			
+			this.minecraftProcess.on('close', (code, signal) => {
+				const runtime = Date.now() - processStartTime;
+				const timeSinceLastOutput = Date.now() - lastOutputTime;
+				
+				// Determine if this was a crash
+				const isCrash = this.detectCrash(code, signal, runtime, timeSinceLastOutput, hasExitedNormally);
+				
+				this.emit('close', {
+					message: 'Minecraft closed',
+					code: code,
+					signal: signal,
+					runtime: runtime,
+					isCrash: isCrash,
+					timeSinceLastOutput: timeSinceLastOutput,
+					instanceId: this.options.instance
+				});
+			});
+			
+			// Monitor for graceful shutdown signals
+			this.minecraftProcess.on('exit', (code, signal) => {
+				if (signal === 'SIGTERM' || code === 0) {
+					hasExitedNormally = true;
+				}
+			});
 
 			// Wait a bit to ensure game is actually running
 			await new Promise(resolve => setTimeout(resolve, 1000));
 			
+			// Get performance metrics and emit them with completion
+			const performanceMetrics = this.performanceMonitor.stopMonitoring();
+			
 			// Only emit complete after everything is done
-			this.emit('complete', { message: 'Minecraft launched successfully', process: this.minecraftProcess.pid });
+			this.emit('complete', { 
+				message: 'Minecraft launched successfully', 
+				process: this.minecraftProcess.pid,
+				performance: performanceMetrics
+			});
 			this.isLaunching = false;
 		} catch (error) {
 			this.isLaunching = false;
@@ -339,11 +437,13 @@ export default class Launch extends EventEmitter {
 
 	async DownloadGame() {
 		if (this.isCancelled) return;
+		console.log(`[DownloadGame] Starting with version: ${this.options.version}`);
 		let InfoVersion = await new jsonMinecraft(this.options).GetInfoVersion();
 		if (this.isCancelled) return;
 		let loaderJson: any = null;
 		if ('error' in InfoVersion) {
-			return this.emit('error', InfoVersion);
+			this.emit('error', InfoVersion);
+			return InfoVersion;
 		}
 		let { json, version } = InfoVersion;
 		let libraries = new librariesMinecraft(this.options);
@@ -371,12 +471,19 @@ export default class Launch extends EventEmitter {
 			this.downloader = new Downloader();
 			let totsize = await bundle.getTotalSize(filesList);
 			
+			// Start download performance monitoring
+			this.performanceMonitor.startDownloadMonitoring();
+			
 			this.downloader.on("progress", (DL: any, totDL: any, element: any) => {
 				this.emit("progress", DL, totDL, element);
+				// Record download progress for performance monitoring
+				this.performanceMonitor.recordDownloadProgress(DL, 100); // Use a fixed interval for now
 			});
 			
 			this.downloader.on("speed", (speed: any) => {
 				this.emit("speed", speed);
+				// Record speed metrics
+				this.performanceMonitor.recordMetric('download_speed', speed);
 			});
 			
 			this.downloader.on("estimated", (time: any) => {
@@ -442,6 +549,13 @@ export default class Launch extends EventEmitter {
 		if (natives.length === 0) json.nativesList = false;
 		else json.nativesList = true;
 		if (isold(json)) new assetsMinecraft(this.options).copyAssets(json);
+		
+		// Configure resource packs if provided
+		if (this.options.resourcePacks && this.options.resourcePacks.length > 0) {
+			this.configureResourcePacks();
+		}
+		
+		console.log(`[DownloadGame] Returning version: ${version}`);
 		return {
 			minecraftJson: json,
 			minecraftLoader: loaderJson,
@@ -480,6 +594,9 @@ export default class Launch extends EventEmitter {
 			this.downloader = null;
 		}
 		
+		// Clean up memory pools
+		this.memoryManager.clearPools();
+		
 		// Enhanced messaging based on state
 		let message = 'Launch process has been cancelled';
 		if (hadProcess) {
@@ -502,5 +619,132 @@ export default class Launch extends EventEmitter {
 
 	public get cancelled(): boolean {
 		return this.isCancelled;
+	}
+
+	public getMemoryStats(): { pools: number; totalObjects: number; heapUsed: number } {
+		return this.memoryManager.getMemoryStats();
+	}
+
+	public forceGarbageCollection(): void {
+		this.memoryManager.forceGC();
+	}
+
+	/**
+	 * Configures resource packs by updating the options.txt file to enable them.
+	 * This ensures that resource packs appear on the right side (enabled) in Minecraft's resource pack menu.
+	 */
+	private configureResourcePacks(): void {
+		if (!this.options.resourcePacks || this.options.resourcePacks.length === 0) {
+			return;
+		}
+
+		const optionsPath = `${this.options.path}/options.txt`;
+		let optionsContent = '';
+
+		// Read existing options.txt if it exists
+		if (fs.existsSync(optionsPath)) {
+			try {
+				optionsContent = fs.readFileSync(optionsPath, 'utf-8');
+			} catch (error) {
+				console.warn(`[ResourcePacks] Failed to read options.txt: ${error}`);
+			}
+		}
+
+		// Extract existing resourcePacks setting
+		const lines = optionsContent.split('\n');
+		const resourcePackLines = lines.filter(line => line.startsWith('resourcePacks:'));
+		const existingResourcePacks = resourcePackLines.length > 0 ? resourcePackLines[0].split(':')[1] : '';
+		
+		// Parse existing resource packs (format: ["pack1.zip","pack2.zip"])
+		let existingPacks: string[] = [];
+		if (existingResourcePacks) {
+			try {
+				existingPacks = JSON.parse(existingResourcePacks);
+			} catch (error) {
+				console.warn(`[ResourcePacks] Failed to parse existing resourcePacks setting: ${error}`);
+			}
+		}
+
+		// Add our enabled resource packs
+		const newResourcePacks = this.options.resourcePacks.map(rp => rp.fileName);
+		const combinedPacks = [...new Set([...existingPacks, ...newResourcePacks])]; // Remove duplicates
+
+		// Create the new resourcePacks line
+		const newResourcePackLine = `resourcePacks:${JSON.stringify(combinedPacks)}`;
+
+		// Update or add the resourcePacks line
+		let updatedLines = lines.filter(line => !line.startsWith('resourcePacks:'));
+		updatedLines.push(newResourcePackLine);
+
+		// Write the updated options.txt
+		try {
+			fs.writeFileSync(optionsPath, updatedLines.join('\n'));
+			console.log(`[ResourcePacks] Updated options.txt with ${combinedPacks.length} resource packs`);
+		} catch (error) {
+			console.error(`[ResourcePacks] Failed to write options.txt: ${error}`);
+		}
+	}
+
+	/**
+	 * Detects if the game process crashed based on exit code, signal, runtime, and other factors
+	 * @param code - Exit code from the process
+	 * @param signal - Signal that terminated the process
+	 * @param runtime - How long the process ran in milliseconds
+	 * @param timeSinceLastOutput - Time since last stdout/stderr output in milliseconds
+	 * @param hasExitedNormally - Whether the process received a normal exit signal
+	 * @returns true if the process likely crashed, false otherwise
+	 */
+	private detectCrash(code: number | null, signal: string | null, runtime: number, timeSinceLastOutput: number, hasExitedNormally: boolean): boolean {
+		// If exited normally via signal, not a crash
+		if (hasExitedNormally) {
+			return false;
+		}
+
+		// Exit code 0 typically means normal exit
+		if (code === 0) {
+			return false;
+		}
+
+		// If killed by user (SIGTERM, SIGINT), not a crash
+		if (signal === 'SIGTERM' || signal === 'SIGINT') {
+			return false;
+		}
+
+		// Common crash exit codes for Java applications
+		const crashExitCodes = [
+			-1,    // General error
+			1,     // General error
+			255,   // Java VM error
+			4294967295, // Unsigned equivalent of -1 (common Java crash)
+			-805306369, // Windows access violation
+			-1073741819, // Windows access violation (0xC0000005)
+			-1073740777, // Windows heap corruption
+			134,   // SIGABRT (abort signal)
+			139,   // SIGSEGV (segmentation fault)
+			137,   // SIGKILL (often OOM killer)
+			143    // SIGTERM (but not our controlled SIGTERM)
+		];
+
+		if (code !== null && crashExitCodes.includes(code)) {
+			return true;
+		}
+
+		// If process ran for very short time (< 10 seconds) and exited with non-zero code, likely a crash
+		if (runtime < 10000 && code !== 0) {
+			return true;
+		}
+
+		// If no output for a long time (> 30 seconds) and then exited, might be a hang/crash
+		if (timeSinceLastOutput > 30000 && code !== 0) {
+			return true;
+		}
+
+		// If killed by signal and not user-initiated, likely a crash
+		if (signal && !['SIGTERM', 'SIGINT'].includes(signal)) {
+			return true;
+		}
+
+		// Default: not a crash
+		return false;
 	}
 }

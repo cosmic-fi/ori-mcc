@@ -7,6 +7,31 @@ import os from 'os';
 import MinecraftNativeLinuxARM from './Minecraft-Lwjgl-Native.js';
 
 /**
+ * Helper function to perform fetch with retries
+ */
+async function fetchWithRetry(url: string, retries = 3, delay = 1000): Promise<Response> {
+	let lastError;
+	for (let i = 0; i < retries; i++) {
+		try {
+			const response = await fetch(url);
+			if (response.ok) return response;
+			// If server error (5xx), throw to trigger retry
+			if (response.status >= 500) {
+				throw new Error(`Server returned ${response.status}`);
+			}
+			// If client error (4xx), don't retry, just return response (caller handles it)
+			return response;
+		} catch (error) {
+			lastError = error;
+			if (i < retries - 1) {
+				await new Promise(resolve => setTimeout(resolve, delay));
+			}
+		}
+	}
+	throw lastError;
+}
+
+/**
  * Basic structure for options passed to the Json class.
  * Modify or expand based on your actual usage.
  */
@@ -74,19 +99,47 @@ export default class Json {
 	 */
 	public async GetInfoVersion(): Promise<GetInfoVersionResult | GetInfoVersionError> {
 		let { version } = this.options;
+		
+		// Debug logging
+		console.log(`[Minecraft-Json] GetInfoVersion called with version: ${version}`);
 
 		// Fetch the version manifest
-		const response = await fetch(
-			`https://launchermeta.mojang.com/mc/game/version_manifest_v2.json?_t=${new Date().toISOString()}`
-		);
+		let response;
+		try {
+			response = await fetchWithRetry(
+				`https://launchermeta.mojang.com/mc/game/version_manifest_v2.json?_t=${new Date().toISOString()}`
+			);
+		} catch (error: any) {
+			console.error('[Minecraft-Json] Failed to fetch version manifest:', error);
+			return {
+				error: true,
+				message: `Failed to fetch version manifest: ${error.message || error}`
+			};
+		}
+
+		if (!response.ok) {
+			return {
+				error: true,
+				message: `Failed to fetch version manifest: Status ${response.status}`
+			};
+		}
+
 		const manifest: MojangVersionManifest = await response.json();
 
 		// Resolve "latest_release"/"latest_snapshot" shorthands
+		console.log(`[Minecraft-Json] Resolving version shorthand: ${version}`);
 		if (version === 'latest_release' || version === 'r' || version === 'lr') {
 			version = manifest.latest.release;
+			console.log(`[Minecraft-Json] Resolved to latest release: ${version}`);
 		} else if (version === 'latest_snapshot' || version === 's' || version === 'ls') {
 			version = manifest.latest.snapshot;
+			console.log(`[Minecraft-Json] Resolved to latest snapshot: ${version}`);
+		} else {
+			console.log(`[Minecraft-Json] Using specified version: ${version}`);
 		}
+		
+		// Debug logging after resolution
+		console.log(`[Minecraft-Json] Version after resolution: ${version}`);
 
 		// Find the matching version info from the manifest
 		const matchedVersion = manifest.versions.find((v) => v.id === version);
@@ -98,7 +151,24 @@ export default class Json {
 		}
 
 		// Fetch the detailed version JSON from Mojang
-		const jsonResponse = await fetch(matchedVersion.url);
+		let jsonResponse;
+		try {
+			jsonResponse = await fetchWithRetry(matchedVersion.url);
+		} catch (error: any) {
+			console.error(`[Minecraft-Json] Failed to fetch version JSON for ${version}:`, error);
+			return {
+				error: true,
+				message: `Failed to fetch version JSON for ${version}: ${error.message || error}`
+			};
+		}
+
+		if (!jsonResponse.ok) {
+			return {
+				error: true,
+				message: `Failed to fetch version JSON for ${version}: Status ${jsonResponse.status}`
+			};
+		}
+
 		let versionJson = await jsonResponse.json();
 
 		// If on Linux ARM, run additional processing
@@ -106,6 +176,9 @@ export default class Json {
 			versionJson = await new MinecraftNativeLinuxARM(this.options).ProcessJson(versionJson);
 		}
 
+		// Debug logging before return
+		console.log(`[Minecraft-Json] Returning version: ${version}`);
+		
 		return {
 			InfoVersion: matchedVersion,
 			json: versionJson,

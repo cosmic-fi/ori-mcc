@@ -287,5 +287,8 @@ export {
 	fromAnyReadable
 };
 
+// Export memory management
+export * from './MemoryManager.js';
+
 // Export error types
 export * from './Errors.js';

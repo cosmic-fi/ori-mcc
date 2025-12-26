@@ -17,6 +17,39 @@ import {
 } from './Errors.js';
 
 /**
+ * Helper function to perform fetch with retries
+ */
+async function fetchWithRetry(url: string, init?: RequestInit, retries = 3, delay = 1000): Promise<Response> {
+	let lastError;
+	for (let i = 0; i < retries; i++) {
+		try {
+			const response = await fetch(url, init);
+			// If successful or client error (4xx), return response
+			if (response.ok || (response.status >= 400 && response.status < 500)) {
+				return response;
+			}
+			// If server error (5xx), throw to trigger retry
+			if (response.status >= 500) {
+				throw new Error(`Server returned ${response.status}`);
+			}
+			return response;
+		} catch (error: any) {
+			lastError = error;
+			// Don't retry if aborted
+			if (error.name === 'AbortError') {
+				throw error;
+			}
+			// Log retry attempt
+			console.log(`[Downloader] Fetch attempt ${i + 1} failed for ${url}: ${error.message}. Retrying...`);
+			if (i < retries - 1) {
+				await new Promise(resolve => setTimeout(resolve, delay * (i + 1))); // Exponential backoff
+			}
+		}
+	}
+	throw lastError;
+}
+
+/**
  * Describes a single file to be downloaded by the Downloader class.
  */
 export interface DownloadOptions {
@@ -66,7 +99,7 @@ export default class Downloader extends EventEmitter {
 		let response: Response;
 
 		try {
-			response = await fetch(url);
+			response = await fetchWithRetry(url);
 			
 			if (!response.ok) {
 				const downloadError = new DownloadError(
@@ -147,6 +180,8 @@ export default class Downloader extends EventEmitter {
 	 * Downloads multiple files concurrently (up to the specified limit).
 	 * Emits "progress" events with cumulative bytes downloaded vs. total size,
 	 * as well as "speed" and "estimated" events for speed and ETA calculations.
+	 * 
+	 * Features adaptive concurrency control based on network performance.
 	 */
 	public async downloadFileMultiple(
 		files: DownloadOptions[],
@@ -164,6 +199,23 @@ export default class Downloader extends EventEmitter {
 		const speeds: number[] = [];
 		let aborted = false;
 		const errors: Error[] = [];
+		
+		// Error rate limiting to prevent spam
+		let lastErrorTime = 0;
+		let errorCount = 0;
+		const ERROR_RATE_LIMIT = 1000; // Minimum ms between error emissions
+		const MAX_BURST_ERRORS = 5; // Maximum errors in a burst
+		
+		// Completion tracking to prevent duplicate logs
+		let isCompleted = false;
+		
+		// Adaptive concurrency control
+		let currentLimit = Math.min(limit, 5); // Start with conservative limit
+		let adaptiveLimit = limit; // Maximum allowed limit
+		let consecutiveSuccesses = 0;
+		let consecutiveFailures = 0;
+		const adaptInterval = 1000; // Adapt every second
+		let lastAdaptTime = Date.now();
 
 		// Handle abort signal
 		if (abortSignal) {
@@ -171,6 +223,27 @@ export default class Downloader extends EventEmitter {
 				aborted = true;
 			});
 		}
+
+		// Rate-limited error emission function
+		const emitErrorWithRateLimit = (error: Error): void => {
+			const now = Date.now();
+			
+			// Reset error count if enough time has passed
+			if (now - lastErrorTime > ERROR_RATE_LIMIT * 2) {
+				errorCount = 0;
+			}
+			
+			// Only emit error if we haven't exceeded burst limit or time limit
+			if (errorCount < MAX_BURST_ERRORS || now - lastErrorTime >= ERROR_RATE_LIMIT) {
+				this.emit('error', error);
+				lastErrorTime = now;
+				errorCount++;
+			} else if (errorCount === MAX_BURST_ERRORS) {
+				// Log a warning once when rate limiting starts
+				console.warn(`[Downloader] Error rate limiting active - suppressing repeated errors. Total errors: ${errors.length}`);
+				errorCount++;
+			}
+		};
 
 		const estimated = setInterval(() => {
 			if (aborted) return;
@@ -187,6 +260,23 @@ export default class Downloader extends EventEmitter {
 
 			start = Date.now();
 			before = downloaded;
+			
+			// Adaptive concurrency control
+			const now = Date.now();
+			if (now - lastAdaptTime >= adaptInterval) {
+				lastAdaptTime = now;
+				
+				// Adjust concurrency based on performance
+				if (consecutiveSuccesses >= 3 && currentLimit < adaptiveLimit) {
+					currentLimit = Math.min(currentLimit + 2, adaptiveLimit);
+					consecutiveSuccesses = 0;
+					console.log(`[Downloader] Increased concurrency to ${currentLimit}`);
+				} else if (consecutiveFailures >= 2 && currentLimit > 3) {
+					currentLimit = Math.max(currentLimit - 1, 3);
+					consecutiveFailures = 0;
+					console.log(`[Downloader] Decreased concurrency to ${currentLimit}`);
+				}
+			}
 		}, 500);
 
 		const downloadNext = async (): Promise<void> => {
@@ -207,7 +297,7 @@ export default class Downloader extends EventEmitter {
 					ErrorCodes.DIRECTORY_CREATE_FAILED
 				);
 				errors.push(fsError);
-				this.emit('error', fsError);
+				emitErrorWithRateLimit(fsError);
 				completed++;
 				downloadNext();
 				return;
@@ -218,12 +308,12 @@ export default class Downloader extends EventEmitter {
 			const timeoutId = setTimeout(() => {
 				controller.abort();
 				const timeoutError = new TimeoutError(
-					`Download timeout for ${file.url}`,
-					timeout,
-					ErrorCodes.NETWORK_TIMEOUT
-				);
-				errors.push(timeoutError);
-				this.emit('error', timeoutError);
+							`Download timeout for ${file.url}`,
+							timeout,
+							ErrorCodes.NETWORK_TIMEOUT
+						);
+						errors.push(timeoutError);
+						emitErrorWithRateLimit(timeoutError);
 			}, timeout);
 
 			try {
@@ -231,8 +321,8 @@ export default class Downloader extends EventEmitter {
 					const abortError = new DownloadError('Download aborted by user', file.url, undefined, ErrorCodes.DOWNLOAD_INTERRUPTED);
 					throw abortError;
 				}
-
-				const response = await fetch(file.url, { signal: controller.signal });
+				
+				const response = await fetchWithRetry(file.url, { signal: controller.signal }, 3, 2000);
 				clearTimeout(timeoutId);
 
 				if (!response.ok) {
@@ -255,19 +345,21 @@ export default class Downloader extends EventEmitter {
 						writer.write(chunk);
 					} catch (err: any) {
 						const fsError = new FileSystemError(
-							`Failed to write chunk: ${err.message}`,
-							file.path,
-							'write',
-							false
-						);
-						errors.push(fsError);
-						this.emit('error', fsError);
+								`Failed to write chunk: ${err.message}`,
+								file.path,
+								'write',
+								false
+							);
+							errors.push(fsError);
+							emitErrorWithRateLimit(fsError);
 					}
 				});
 
 				stream.on('end', () => {
 					writer.end();
 					completed++;
+					consecutiveSuccesses++;
+					consecutiveFailures = 0;
 					downloadNext();
 				});
 
@@ -275,8 +367,10 @@ export default class Downloader extends EventEmitter {
 					writer.destroy();
 					const wrappedError = wrapError(err, { url: file.url, path: file.path });
 					errors.push(wrappedError);
-					this.emit('error', wrappedError);
+					emitErrorWithRateLimit(wrappedError);
 					completed++;
+					consecutiveFailures++;
+					consecutiveSuccesses = 0;
 					downloadNext();
 				});
 
@@ -291,9 +385,22 @@ export default class Downloader extends EventEmitter {
 					error = wrapError(new Error(String(e)), { url: file.url, path: file.path });
 				}
 				
+				// Add more context for fetch failures
+				if (error.message.includes('fetch failed')) {
+					const enhancedError = new DownloadError(
+						`Failed to download ${file.url}: ${error.message}. This may be due to network issues or server problems.`,
+						file.url,
+						undefined,
+						ErrorCodes.DOWNLOAD_FAILED
+					);
+					error = enhancedError;
+				}
+				
 				errors.push(error);
-				this.emit('error', error);
+				emitErrorWithRateLimit(error);
 				completed++;
+				consecutiveFailures++;
+				consecutiveSuccesses = 0;
 				downloadNext();
 			}
 		};
@@ -310,18 +417,29 @@ export default class Downloader extends EventEmitter {
 					return;
 				}
 				
-				if (completed === files.length) {
+				if (completed === files.length && !isCompleted) {
+					isCompleted = true;
 					clearInterval(estimated);
 					
 					// Ensure all streams are properly closed
 					setTimeout(() => {
-						const criticalErrors = errors.filter(err => !err.hasOwnProperty('recoverable') || !(err as any).recoverable);
-						if (criticalErrors.length > 0) {
-							reject(criticalErrors[0]);
+						// Allow some downloads to fail (especially assets) without stopping the entire process
+						const failureRate = errors.length / files.length;
+						const isCriticalFailure = failureRate > 0.1; // More than 10% failure rate is considered critical
+						
+						if (errors.length > 0 && isCriticalFailure) {
+							console.log(`[Downloader] ${errors.length} downloads failed out of ${files.length} (${(failureRate * 100).toFixed(1)}% failure rate)`);
+							reject(errors[0]);
+						} else if (errors.length > 0) {
+							console.log(`[Downloader] ${errors.length} downloads failed out of ${files.length} (${(failureRate * 100).toFixed(1)}% failure rate) - continuing with partial success`);
+							resolve();
 						} else {
 							resolve();
 						}
 					}, 100); // Small delay to ensure all streams are closed
+					
+					// Prevent further checks once completed
+					clearInterval(interval);
 					return;
 				}
 			};

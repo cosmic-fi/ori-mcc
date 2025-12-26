@@ -106,7 +106,7 @@ export default class FabricMC extends EventEmitter {
 
 		if (!selectedBuild) {
 			return {
-				error: `Fabric Loader ${this.options.loader.build} not found, Available builds: ${availableBuilds.join(', ')}`
+				error: `LegacyFabric Loader ${this.options.loader.build} not found, Available builds: ${availableBuilds.join(', ')}`
 			};
 		}
 
